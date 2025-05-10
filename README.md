@@ -82,7 +82,7 @@ Welcome to the **NewsBot Backend**, a high-performance, scalable REST API built 
    ```
 
 3. **Configure environment variables**:
-   Create a `config/config.env` file:
+   Create a `config.env` file in the `config` folder:
 
    ```env
    PORT=4000
