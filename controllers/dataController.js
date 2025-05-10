@@ -19,6 +19,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MAX_HISTORY = 50;
 const COLLECTION_NAME = 'news_articles';
 const CACHE_TTL = 3600; // 1 hour in seconds
+const QUERY_LEADERBOARD_KEY = 'queries:leaderboard';
+const QUERY_LEADERBOARD_TTL = 24 * 60 * 60;
+
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
@@ -181,11 +184,36 @@ const generateCacheKey = (queryText) => {
     return `query:${crypto.createHash('md5').update(queryText.trim().toLowerCase()).digest('hex')}`;
 };
 
-// const commonQueries = [
-//     { queryText: 'What is AI?', numberOfPassages: 5 },
-//     { queryText: 'How does machine learning work?', numberOfPassages: 5 },
-//     { queryText: 'What is a neural network?', numberOfPassages: 5 },
-// ];
+
+export const warmCache = async () => {
+    console.log('Starting cache warming...');
+    try {
+        // Get dynamic common queries
+        const commonQueries = await generateCommonQueries();
+
+        for (const { queryText, numberOfPassages } of commonQueries) {
+            const cacheKey = generateCacheKey(queryText);
+            const cached = await redisClient.get(cacheKey);
+
+            if (!cached) {
+                console.log(`Warming cache for query: ${queryText}`);
+                const topKPassages = await retrieveTopKPassages(queryText, numberOfPassages);
+                const answer = await generateAnswerWithGemini(queryText, topKPassages);
+                const cacheData = {
+                    passages: topKPassages,
+                    answer,
+                };
+                await redisClient.setEx(cacheKey, CACHE_TTL, JSON.stringify(cacheData));
+                console.log(`Cached query: ${queryText}`);
+            } else {
+                console.log(`Cache already warm for query: ${queryText}`);
+            }
+        }
+        console.log('Cache warming completed.');
+    } catch (error) {
+        console.error('Error during cache warming:', error);
+    }
+};
 
 const generateCommonQueries = async () => {
     try {
@@ -258,35 +286,6 @@ const generateTrendingQueries = async () => {
     }
 };
 
-
-export const warmCache = async () => {
-    console.log('Starting cache warming...');
-    try {
-        for (const { queryText, numberOfPassages } of commonQueries) {
-            const cacheKey = generateCacheKey(queryText);
-            const cached = await redisClient.get(cacheKey);
-
-            if (!cached) {
-                console.log(`Warming cache for query: ${queryText}`);
-                const topKPassages = await retrieveTopKPassages(queryText, numberOfPassages);
-                const answer = await generateAnswerWithGemini(queryText, topKPassages);
-                const cacheData = {
-                    passages: topKPassages,
-                    answer,
-                };
-                await redisClient.setEx(cacheKey, 3600, JSON.stringify(cacheData));
-                console.log(`Cached query: ${queryText}`);
-            } else {
-                console.log(`Cache already warm for query: ${queryText}`);
-            }
-        }
-        console.log('Cache warming completed.');
-    } catch (error) {
-        console.error('Error during cache warming:', error);
-    }
-};
-
-
 export const getAllData = async (req, res) => {
     const feedUrls = [
         'http://feeds.bbci.co.uk/news/rss.xml',
@@ -295,8 +294,6 @@ export const getAllData = async (req, res) => {
     ];
 
     try {
-        // await createCollection();
-
         const allArticles = [];
 
         for (const url of feedUrls) {
@@ -306,7 +303,6 @@ export const getAllData = async (req, res) => {
 
         const unique = Array.from(new Map(allArticles.map(a => [a.link, a])).values());
 
-        // Inject full content
         const articlesWithFullContent = await Promise.all(
             unique.map(async (article) => {
                 const fullText = await scrapeFullContent(article.link);
@@ -316,17 +312,15 @@ export const getAllData = async (req, res) => {
                 };
             })
         );
-        // Prepare texts to embed (e.g., title + content)
+
         const textsToEmbed = articlesWithFullContent.map(
             a => `${a.title}. ${a.fullContent}`
         );
 
-        // Call Jina
         const embeddings = await embedWithJina(textsToEmbed);
 
         await storeEmbeddings(articlesWithFullContent, embeddings);
 
-        // Attach embeddings back to articles
         const embeddedArticles = articlesWithFullContent.map((article, idx) => ({
             ...article,
             embedding: embeddings[idx] || []
@@ -334,11 +328,9 @@ export const getAllData = async (req, res) => {
 
         res.status(200).json({
             success: true,
-            message: 'feed retrieved successfully',
-            // articles: articlesWithFullContent,
-            embeddedArticles
+            message: 'Feed retrieved successfully',
+            embeddedArticles,
         });
-
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -346,8 +338,6 @@ export const getAllData = async (req, res) => {
         });
     }
 };
-
-// Utility to generate cache key from query text
 
 export const queryChatBot = async (req, res) => {
     const { queryText, numberOfPassages = 5 } = req.body;
@@ -360,6 +350,12 @@ export const queryChatBot = async (req, res) => {
     }
 
     try {
+        // Track query frequency in Redis leaderboard
+        const normalizedQuery = queryText.trim().toLowerCase();
+        await redisClient.zIncrBy(QUERY_LEADERBOARD_KEY, 1, normalizedQuery);
+        // Set TTL for leaderboard to prevent indefinite growth
+        await redisClient.expire(QUERY_LEADERBOARD_KEY, QUERY_LEADERBOARD_TTL);
+
         // Check cache for existing response
         const cacheKey = generateCacheKey(queryText);
         const cachedResponse = await redisClient.get(cacheKey);
@@ -368,7 +364,6 @@ export const queryChatBot = async (req, res) => {
             console.log(`Cache hit for query: ${queryText}`);
             const parsedResponse = JSON.parse(cachedResponse);
 
-            // Store in session history
             if (!req.session.history) {
                 req.session.history = [];
             }
@@ -394,7 +389,6 @@ export const queryChatBot = async (req, res) => {
 
         console.log(`Cache miss for query: ${queryText}`);
 
-        // Retrieve top-k passages
         const topKPassages = await retrieveTopKPassages(queryText, numberOfPassages);
 
         if (topKPassages.length === 0) {
@@ -405,10 +399,8 @@ export const queryChatBot = async (req, res) => {
             });
         }
 
-        // Generate answer with Gemini
         const answer = await generateAnswerWithGemini(queryText, topKPassages);
 
-        // Store in session history
         if (!req.session.history) {
             req.session.history = [];
         }
@@ -423,7 +415,6 @@ export const queryChatBot = async (req, res) => {
         }
         req.session.history.push(historyEntry);
 
-        // Cache the response
         const cacheData = {
             passages: topKPassages,
             answer,
@@ -446,6 +437,7 @@ export const queryChatBot = async (req, res) => {
         });
     }
 };
+
 
 // Endpoint to fetch session history
 export const getSessionHistory = async (req, res) => {
