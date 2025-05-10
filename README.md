@@ -18,7 +18,7 @@ Welcome to the **NewsBot Backend**, a high-performance, scalable REST API built 
   - `POST /api/v1/data/query/chatbot`: Processes user queries, retrieves relevant passages, and generates answers.
   - `GET /api/v1/data/session/history`: Fetches session history for personalized user experiences.
   - `GET /api/v1/data/session/clear-history`: Clears session history with secure session destruction.
-  - `GET /api/v1/data`: Ingests and processes news articles, storing embeddings in Qdrant.
+  - `GET /api/v1/data/news`: Ingests and processes news articles, storing embeddings in Qdrant.
 - Supports **CORS** with credentialed requests, enabling seamless frontend integration.
 
 ### 3. Intelligent Caching & Performance
@@ -72,8 +72,7 @@ Welcome to the **NewsBot Backend**, a high-performance, scalable REST API built 
 1. **Clone the repository**:
 
    ```bash
-   git clone <repository-url>
-   cd chatbot/backend
+   git clone https://github.com/aniasusual/RAG-chatbot-backend.git
    ```
 
 2. **Install dependencies**:
@@ -110,7 +109,7 @@ Welcome to the **NewsBot Backend**, a high-performance, scalable REST API built 
 
 | Method | Endpoint                             | Description                              |
 | ------ | ------------------------------------ | ---------------------------------------- |
-| GET    | `/api/v1/data`                       | Fetches and processes news articles.     |
+| GET    | `/api/v1/data/news`                       | Fetches and processes news articles.     |
 | POST   | `/api/v1/data/query/chatbot`         | Processes a query and returns an answer. |
 | GET    | `/api/v1/data/session/history`       | Retrieves session history.               |
 | GET    | `/api/v1/data/session/clear-history` | Clears session history.                  |
@@ -143,4 +142,4 @@ MIT
 
 ---
 
-**Built with 💻 and ☕ by [Animesh]**
+**Built with 💻 and ☕ by Animesh**
