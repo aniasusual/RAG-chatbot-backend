@@ -6,6 +6,8 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { v4 as uuidv4 } from 'uuid';
 // import { RedisStore } from 'connect-redis';
+import crypto from 'crypto';
+import { redisClient } from '../app.js';
 
 if (process.env.NODE_ENV !== "production") {
     config({ path: "config/config.env" });
@@ -14,9 +16,9 @@ if (process.env.NODE_ENV !== "production") {
 const JINA_API_KEY = process.env.JINA_API_KEY
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
-// const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const MAX_HISTORY = 50;
+const COLLECTION_NAME = 'news_articles';
+const CACHE_TTL = 3600; // 1 hour in seconds
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
@@ -29,7 +31,6 @@ const qdrantClient = new QdrantClient({
     // apiKey: QDRANT_API_KEY,
 });
 
-const COLLECTION_NAME = 'news_articles';
 
 // Create collection on application startup
 const initializeQdrant = async () => {
@@ -176,6 +177,116 @@ const retrieveTopKPassages = async (query, k = 5) => {
     }
 };
 
+const generateCacheKey = (queryText) => {
+    return `query:${crypto.createHash('md5').update(queryText.trim().toLowerCase()).digest('hex')}`;
+};
+
+// const commonQueries = [
+//     { queryText: 'What is AI?', numberOfPassages: 5 },
+//     { queryText: 'How does machine learning work?', numberOfPassages: 5 },
+//     { queryText: 'What is a neural network?', numberOfPassages: 5 },
+// ];
+
+const generateCommonQueries = async () => {
+    try {
+        // Get top 10 frequent queries from Redis leaderboard
+        const topQueries = await redisClient.zRangeWithScores(QUERY_LEADERBOARD_KEY, 0, 9);
+        const frequentQueries = topQueries.map(({ value, score }) => ({
+            queryText: value,
+            numberOfPassages: 5,
+        }));
+
+        // Get trending topics from news articles
+        const trendingQueries = await generateTrendingQueries();
+
+        // Combine and deduplicate queries (prioritize frequent queries)
+        const combinedQueries = [...frequentQueries, ...trendingQueries];
+        const uniqueQueries = Array.from(
+            new Map(combinedQueries.map(q => [q.queryText.toLowerCase(), q])).values()
+        );
+
+        // Limit to 10 queries
+        return uniqueQueries.slice(0, 10);
+    } catch (error) {
+        console.error('Error generating common queries:', error);
+        // Fallback to static queries
+        return [
+            { queryText: 'What is AI?', numberOfPassages: 5 },
+            { queryText: 'How does machine learning work?', numberOfPassages: 5 },
+            { queryText: 'What is a neural network?', numberOfPassages: 5 },
+        ];
+    }
+};
+
+const generateTrendingQueries = async () => {
+    try {
+        // Fetch recent articles from Qdrant
+        const results = await qdrantClient.scroll(COLLECTION_NAME, {
+            limit: 50,
+            with_payload: true,
+        });
+
+        const articles = results.points.map(point => ({
+            title: point.payload.title,
+            fullContent: point.payload.fullContent,
+        }));
+
+        // Extract keywords from titles (simple term frequency)
+        const keywordCounts = {};
+        articles.forEach(({ title }) => {
+            const words = title.toLowerCase().split(/\W+/).filter(word =>
+                word.length > 3 && !['news', 'latest', 'update', 'report'].includes(word)
+            );
+            words.forEach(word => {
+                keywordCounts[word] = (keywordCounts[word] || 0) + 1;
+            });
+        });
+
+        // Get top 5 keywords
+        const topKeywords = Object.entries(keywordCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([keyword]) => ({
+                queryText: `What is ${keyword}?`,
+                numberOfPassages: 5,
+            }));
+
+        return topKeywords;
+    } catch (error) {
+        console.error('Error generating trending queries:', error);
+        return [];
+    }
+};
+
+
+export const warmCache = async () => {
+    console.log('Starting cache warming...');
+    try {
+        for (const { queryText, numberOfPassages } of commonQueries) {
+            const cacheKey = generateCacheKey(queryText);
+            const cached = await redisClient.get(cacheKey);
+
+            if (!cached) {
+                console.log(`Warming cache for query: ${queryText}`);
+                const topKPassages = await retrieveTopKPassages(queryText, numberOfPassages);
+                const answer = await generateAnswerWithGemini(queryText, topKPassages);
+                const cacheData = {
+                    passages: topKPassages,
+                    answer,
+                };
+                await redisClient.setEx(cacheKey, 3600, JSON.stringify(cacheData));
+                console.log(`Cached query: ${queryText}`);
+            } else {
+                console.log(`Cache already warm for query: ${queryText}`);
+            }
+        }
+        console.log('Cache warming completed.');
+    } catch (error) {
+        console.error('Error during cache warming:', error);
+    }
+};
+
+
 export const getAllData = async (req, res) => {
     const feedUrls = [
         'http://feeds.bbci.co.uk/news/rss.xml',
@@ -236,11 +347,10 @@ export const getAllData = async (req, res) => {
     }
 };
 
+// Utility to generate cache key from query text
 
 export const queryChatBot = async (req, res) => {
     const { queryText, numberOfPassages = 5 } = req.body;
-
-    console.log(queryText);
 
     if (!queryText || typeof queryText !== 'string') {
         return res.status(400).json({
@@ -250,7 +360,41 @@ export const queryChatBot = async (req, res) => {
     }
 
     try {
-        // Retrieve top-k passages (default k=5)
+        // Check cache for existing response
+        const cacheKey = generateCacheKey(queryText);
+        const cachedResponse = await redisClient.get(cacheKey);
+
+        if (cachedResponse) {
+            console.log(`Cache hit for query: ${queryText}`);
+            const parsedResponse = JSON.parse(cachedResponse);
+
+            // Store in session history
+            if (!req.session.history) {
+                req.session.history = [];
+            }
+            const historyEntry = {
+                query: queryText,
+                passages: parsedResponse.passages,
+                answer: parsedResponse.answer,
+                timestamp: new Date().toISOString(),
+            };
+            if (req.session.history.length >= MAX_HISTORY) {
+                req.session.history.shift();
+            }
+            req.session.history.push(historyEntry);
+
+            return res.status(200).json({
+                success: true,
+                message: 'Query retrieved from cache',
+                query: queryText,
+                passages: parsedResponse.passages,
+                answer: parsedResponse.answer,
+            });
+        }
+
+        console.log(`Cache miss for query: ${queryText}`);
+
+        // Retrieve top-k passages
         const topKPassages = await retrieveTopKPassages(queryText, numberOfPassages);
 
         if (topKPassages.length === 0) {
@@ -264,22 +408,28 @@ export const queryChatBot = async (req, res) => {
         // Generate answer with Gemini
         const answer = await generateAnswerWithGemini(queryText, topKPassages);
 
+        // Store in session history
         if (!req.session.history) {
             req.session.history = [];
         }
-
-        // Store query and response in session history
         const historyEntry = {
             query: queryText,
             passages: topKPassages,
             answer,
             timestamp: new Date().toISOString(),
         };
-
         if (req.session.history.length >= MAX_HISTORY) {
-            req.session.history.shift(); // Remove oldest entry
+            req.session.history.shift();
         }
         req.session.history.push(historyEntry);
+
+        // Cache the response
+        const cacheData = {
+            passages: topKPassages,
+            answer,
+        };
+        await redisClient.setEx(cacheKey, CACHE_TTL, JSON.stringify(cacheData));
+        console.log(`Cached response for query: ${queryText}`);
 
         res.status(200).json({
             success: true,
@@ -289,6 +439,7 @@ export const queryChatBot = async (req, res) => {
             answer,
         });
     } catch (error) {
+        console.error('Error in queryChatBot:', error);
         res.status(500).json({
             success: false,
             message: error.message,
@@ -300,6 +451,7 @@ export const queryChatBot = async (req, res) => {
 export const getSessionHistory = async (req, res) => {
     try {
         const history = req.session.history || [];
+        console.log("history: ", history);
         res.status(200).json({
             success: true,
             message: 'Session history retrieved successfully',
