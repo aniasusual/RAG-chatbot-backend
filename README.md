@@ -85,6 +85,7 @@ Welcome to the **NewsBot Backend**, a high-performance, scalable REST API built 
    Create a `config/config.env` file:
 
    ```env
+   PORT=4000
    NODE_ENV=development
    REDIS_URL=redis://localhost:6379
    SESSION_SECRET=your-secure-secret
