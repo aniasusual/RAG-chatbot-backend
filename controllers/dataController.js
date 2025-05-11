@@ -15,6 +15,7 @@ if (process.env.NODE_ENV !== "production") {
 
 const JINA_API_KEY = process.env.JINA_API_KEY
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MAX_HISTORY = 50;
 const COLLECTION_NAME = 'news_articles';
@@ -31,7 +32,7 @@ let parser = new Parser();
 // Initialize Qdrant client
 const qdrantClient = new QdrantClient({
     url: QDRANT_URL,
-    // apiKey: QDRANT_API_KEY,
+    apiKey: QDRANT_API_KEY,
 });
 
 
