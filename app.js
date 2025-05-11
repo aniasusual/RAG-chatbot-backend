@@ -12,7 +12,7 @@ import { RedisStore } from 'connect-redis';
 import { createClient } from 'redis';
 import { warmCache } from './controllers/dataController.js';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const REDIS_URL = process.env.REDIS_EXTERNAL_URL || 'redis://localhost:6379';
 const SESSION_TTL = 24 * 60 * 60;
 
 
